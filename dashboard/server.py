@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
@@ -33,7 +33,7 @@ ZH = {
     "Internal intelligence": "内部情报分析", "127.0.0.1 only": "仅限 127.0.0.1",
     "Source events": "来源事件", "Snapshots": "快照", "Model success": "模型成功率",
     "Next schedule": "下次调度", "Recent runs": "最近运行",
-    "Week/date": "周/日期", "Source": "来源", "All": "全部", "Topic": "主题",
+    "Week": "周", "Date": "日期", "Source": "来源", "All": "全部", "Topic": "主题",
     "Owner": "负责人", "Risks only": "仅看风险", "Filter": "筛选",
     "No evidence IDs supplied": "没有提供证据 ID", "Confidence": "置信度",
     "No findings match these filters.": "没有符合筛选条件的发现。",
@@ -65,6 +65,103 @@ ZH = {
     "succeeded": "成功", "failed": "失败", "partial": "部分成功", "running": "运行中",
     "skipped": "已跳过", "unavailable": "不可用", "inactive": "未运行", "disabled": "未启用",
 }
+
+
+def _inline_markdown(value: str) -> str:
+    """Render the small inline subset used by generated reports, escaping raw HTML."""
+    pattern = re.compile(
+        r"\[([^\]]+)\]\(([^)\s]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|_([^_]+)_"
+    )
+    rendered: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(value):
+        rendered.append(escape(value[cursor:match.start()]))
+        label, target, code, strong, emphasis = match.groups()
+        if label is not None and target is not None:
+            parsed = urlparse(target)
+            if parsed.scheme in {"http", "https"} or target.startswith("/"):
+                rendered.append(
+                    f"<a href='{escape(target, quote=True)}' rel='noreferrer'>"
+                    f"{escape(label)}</a>"
+                )
+            else:
+                rendered.append(escape(match.group(0)))
+        elif code is not None:
+            rendered.append(f"<code>{escape(code)}</code>")
+        elif strong is not None:
+            rendered.append(f"<strong>{escape(strong)}</strong>")
+        elif emphasis is not None:
+            rendered.append(f"<em>{escape(emphasis)}</em>")
+        cursor = match.end()
+    rendered.append(escape(value[cursor:]))
+    return "".join(rendered)
+
+
+def render_markdown_preview(markdown: str) -> str:
+    """Render a safe, dependency-free Markdown preview for weekly reports."""
+    lines = markdown.splitlines()
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append(f"<p>{_inline_markdown(' '.join(paragraph))}</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        if list_items:
+            blocks.append("<ul>" + "".join(
+                f"<li>{_inline_markdown(item)}</li>" for item in list_items
+            ) + "</ul>")
+            list_items.clear()
+
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            index += 1
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            flush_paragraph()
+            flush_list()
+            level = len(heading.group(1))
+            blocks.append(f"<h{level}>{_inline_markdown(heading.group(2))}</h{level}>")
+            index += 1
+            continue
+        if line.startswith("- "):
+            flush_paragraph()
+            list_items.append(line[2:])
+            index += 1
+            continue
+        if (line.startswith("|") and index + 1 < len(lines)
+                and re.fullmatch(r"\|?[\s:|-]+\|?", lines[index + 1].strip())):
+            flush_paragraph()
+            flush_list()
+            header = [cell.strip() for cell in line.strip("|").split("|")]
+            index += 2
+            rows: list[list[str]] = []
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                rows.append([cell.strip() for cell in lines[index].strip().strip("|").split("|")])
+                index += 1
+            head = "".join(f"<th>{_inline_markdown(cell)}</th>" for cell in header)
+            body = "".join("<tr>" + "".join(
+                f"<td>{_inline_markdown(cell)}</td>" for cell in row
+            ) + "</tr>" for row in rows)
+            blocks.append(
+                f"<div class='table-wrap'><table><thead><tr>{head}</tr></thead>"
+                f"<tbody>{body}</tbody></table></div>"
+            )
+            continue
+        flush_list()
+        paragraph.append(line)
+        index += 1
+    flush_paragraph()
+    flush_list()
+    return "".join(blocks)
 
 
 def _read_json(path: str | None, data_dir: Path) -> dict[str, Any] | None:
@@ -319,8 +416,22 @@ class DashboardData:
 
     @staticmethod
     def _matches_finding(item: dict[str, Any], filters: dict[str, str]) -> bool:
-        if filters.get("week") and not str(item.get("week", "")).startswith(filters["week"]):
+        item_date = str(item.get("week", ""))[:10]
+        selected_date = filters.get("date", "")
+        if selected_date and item_date != selected_date:
             return False
+        selected_week = filters.get("week", "")
+        if selected_week:
+            match = re.fullmatch(r"(\d{4})-W(\d{2})", selected_week)
+            if match:
+                try:
+                    iso_year, iso_week, _ = date.fromisoformat(item_date).isocalendar()
+                except ValueError:
+                    return False
+                if (iso_year, iso_week) != (int(match.group(1)), int(match.group(2))):
+                    return False
+            elif not item_date.startswith(selected_week):  # old bookmarked YYYY-MM filters
+                return False
         if filters.get("source") and filters["source"] not in item.get("sources", []):
             return False
         if filters.get("owner") and filters["owner"] != item.get("owner"):
@@ -480,8 +591,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _findings(self, query: dict[str, str]) -> str:
         findings = self.data.findings(query)
+        selected_week = query.get('week', '')
+        if not re.fullmatch(r"\d{4}-W\d{2}", selected_week):
+            selected_week = ""
+        selected_date = query.get('date', '')
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", selected_date):
+            selected_date = ""
         form = f"""<form class='filters' method='get'>
-        <label>{self._t('Week/date')} <input name='week' value='{escape(query.get('week', ''))}' placeholder='2026-09'></label>
+        <label>{self._t('Week')} <input type='week' name='week' value='{escape(selected_week)}'></label>
+        <label>{self._t('Date')} <input type='date' name='date' value='{escape(selected_date)}'></label>
         <label>{self._t('Source')} <select name='source'><option value=''>{self._t('All')}</option>{self._options(['slack','fireflies','email'], query.get('source'))}</select></label>
         <label>{self._t('Topic')} <input name='topic' value='{escape(query.get('topic', ''))}'></label>
         <label>{self._t('Owner')} <input name='owner' value='{escape(query.get('owner', ''))}'></label>
@@ -610,7 +728,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             f"<a class='tag' href='/weekly?report={quote(item['name'])}'>{escape(item['name'][:-3])}</a>"
             for item in value["reports"])
         return (f"<div class='report-list'>{links}</div>"
-                f"<article class='weekly-report'><pre>{escape(value['text'])}</pre></article>")
+                f"<article class='weekly-report markdown-preview'>"
+                f"{render_markdown_preview(value['text'])}</article>")
 
     def _run_detail(self, run_id: str) -> str:
         value = self.data.run_detail(run_id)
@@ -750,6 +869,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         .finding{margin:12px 0}.tag{display:inline-block;margin:3px;text-decoration:none}.compare{display:grid;grid-template-columns:1fr 1fr;gap:18px}.compare-column ol{padding-left:20px}.metrics{padding:8px;background:var(--lime);border-radius:6px}
         .metric-table{margin:18px 0}.metric-table th:first-child{width:190px}.metric-bar{height:6px;background:#edf1ee;border-radius:9px;margin-top:7px;overflow:hidden}.metric-bar i{display:block;height:100%;background:var(--green)}
         .review-panel{background:white;border:1px solid var(--line);border-radius:10px;padding:18px}.review-form{display:flex;flex-direction:column;gap:12px}.score-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.check{flex-direction:row;align-items:center}.review-history{padding-left:20px}.review-history li{margin:10px 0}
+        .report-list{margin-bottom:16px}.markdown-preview{background:white;border:1px solid var(--line);border-radius:10px;padding:clamp(20px,4vw,44px);font-size:15px;line-height:1.7}.markdown-preview h1{font-size:30px;margin:0 0 24px}.markdown-preview h2{font-size:22px;border-bottom:1px solid var(--line);padding-bottom:8px;margin:34px 0 14px}.markdown-preview h3{font-size:17px;margin-top:24px}.markdown-preview p{max-width:1000px}.markdown-preview li{margin:6px 0}.markdown-preview code{background:#edf1ee;border-radius:4px;padding:2px 5px;font-size:.92em}.markdown-preview .table-wrap{margin:18px 0}.markdown-preview table{min-width:720px}
         .status.succeeded{background:var(--lime);color:#245112}.status.failed{background:#ffe0dc;color:#8b1d12}.status.partial,.status.running{background:var(--amber);color:#664c00}
         pre{overflow:auto;white-space:pre-wrap;word-break:break-word;background:#13221d;color:#e6f0eb;padding:16px;border-radius:8px;max-height:460px}.path{font-family:ui-monospace,monospace;word-break:break-all}.empty{padding:28px;border:1px dashed #b7c3bc;color:var(--muted);text-align:center;border-radius:10px}
         @media(max-width:850px){.cards{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}.score-grid{grid-template-columns:1fr 1fr}header{height:auto;padding:16px 24px;align-items:flex-start}nav{flex-wrap:wrap}.page-title{align-items:flex-start;gap:12px}}

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
 
-from dashboard.server import DashboardData
+from dashboard.server import DashboardData, DashboardHandler, render_markdown_preview
 from apps.orchestrator.pipeline import Pipeline
 
 
@@ -41,6 +42,21 @@ class DashboardTests(unittest.TestCase):
         event_id = findings[0]["evidence_event_ids"][0]
         self.assertIsNotNone(self.dashboard.evidence(event_id))
         self.assertEqual(self.dashboard.findings({"source": "does-not-exist"}), [])
+
+    def test_findings_support_native_week_and_date_filters(self) -> None:
+        item = self.dashboard.findings({})[0]
+        finding_date = item["week"][:10]
+        iso_year, iso_week, _ = date.fromisoformat(finding_date).isocalendar()
+        self.assertTrue(self.dashboard.findings({"date": finding_date}))
+        self.assertTrue(self.dashboard.findings({"week": f"{iso_year}-W{iso_week:02d}"}))
+        self.assertEqual(self.dashboard.findings({"date": "2000-01-01"}), [])
+
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.data = self.dashboard
+        handler.language = "zh"
+        html = handler._findings({})
+        self.assertIn("type='week'", html)
+        self.assertIn("type='date'", html)
 
     def test_compare_pairs_two_providers_on_snapshot(self) -> None:
         value = self.dashboard.comparison(self.result["snapshot_id"])
@@ -78,6 +94,18 @@ class DashboardTests(unittest.TestCase):
         (directory / "2026-W38.md").write_text("# safe report", encoding="utf-8")
         self.assertEqual(self.dashboard.weekly_report()["name"], "2026-W38.md")
         self.assertIsNone(self.dashboard.weekly_report("../secret.md"))
+
+    def test_weekly_markdown_is_rendered_as_safe_preview(self) -> None:
+        html = render_markdown_preview(
+            "# Weekly\n\n- **Done**: `item`\n\n"
+            "| Model | Cost |\n|---|---:|\n| Claude | $1 |\n\n"
+            "[Dashboard](http://127.0.0.1:8080/) <script>alert(1)</script>")
+        self.assertIn("<h1>Weekly</h1>", html)
+        self.assertIn("<strong>Done</strong>", html)
+        self.assertIn("<table>", html)
+        self.assertIn("href='http://127.0.0.1:8080/'", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
 
 
 if __name__ == "__main__":
