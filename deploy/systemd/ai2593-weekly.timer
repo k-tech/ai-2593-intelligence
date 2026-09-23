@@ -1,0 +1,10 @@
+[Unit]
+Description=Build AI-2593 weekly local report
+
+[Timer]
+OnCalendar=Mon *-*-* 10:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

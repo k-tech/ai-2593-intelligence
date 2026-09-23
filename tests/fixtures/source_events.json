@@ -1,0 +1,35 @@
+[
+  {
+    "source": "slack",
+    "external_id": "slack-demo-001",
+    "event_time": "2026-09-15T02:15:00Z",
+    "title": "AI 工具反馈",
+    "text": "团队反馈每日摘要缺少直接证据链接，建议所有行动项显示来源事件。联系 demo.user@example.test。",
+    "source_url": "https://slack.example.test/archives/demo/001",
+    "participants": ["Liu", "Demo User <demo.user@example.test>"],
+    "tags": ["ai", "feedback"],
+    "sensitivity": "internal"
+  },
+  {
+    "source": "fireflies",
+    "external_id": "meeting-demo-001",
+    "event_time": "2026-09-16T08:00:00Z",
+    "title": "双模型分析试运行",
+    "text": "会议决定先运行脱敏 fixture 和一个真实数据源。LU 负责检查报告，Liu 负责运行审计。",
+    "source_url": "https://fireflies.example.test/view/demo-001",
+    "participants": ["Liu", "LU"],
+    "tags": ["decision", "ai2593"],
+    "sensitivity": "internal"
+  },
+  {
+    "source": "email",
+    "external_id": "email-demo-thread-001",
+    "event_time": "2026-09-17T11:30:00Z",
+    "title": "MVP 周报验收建议",
+    "text": "请在周报中区分空结果和数据源不可用，并列出模型耗时、证据覆盖率以及需要人工复核的事项。",
+    "source_url": "https://mail.example.test/thread/demo-001",
+    "participants": ["reviewer@example.test", "Liu"],
+    "tags": ["report", "acceptance"],
+    "sensitivity": "internal"
+  }
+]

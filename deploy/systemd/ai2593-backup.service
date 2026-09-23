@@ -1,0 +1,22 @@
+[Unit]
+Description=AI-2593 SQLite online backup
+OnFailure=ai2593-server-audit.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/codex_projects/ai-2593-intelligence
+Environment=PYTHONPATH=/home/ubuntu/codex_projects/ai-2593-intelligence
+Environment=AI2593_DATA_DIR=/home/ubuntu/codex_projects/ai-2593-intelligence/output
+Environment=AI2593_CONFIG=/home/ubuntu/codex_projects/ai-2593-intelligence/config/sources.local.yml
+Environment=AI2593_PUBLISH_MODE=disabled
+ExecStart=/usr/bin/python3 -m apps.orchestrator.cli backup
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/codex_projects/ai-2593-intelligence/output
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai2593-backup
+LogNamespace=ai2593

@@ -1,0 +1,29 @@
+schema_version: "1.0"
+
+feedmob_mcp:
+  endpoint: https://assistant.feedmob.ai/mcp
+  token_file: /etc/ai2593/feedmob.token
+  timeout_seconds: 30
+
+# 示例值均为虚构内容。真实 allowlist 不得提交到 Git。
+slack:
+  enabled: false
+  channels: []
+
+fireflies:
+  enabled: false
+  meeting_title_patterns: []
+  participant_domains: []
+
+email:
+  enabled: false
+  allowed_senders: []
+  subject_patterns: []
+  excluded_categories:
+    - finance
+    - reporting
+    - payment
+
+google_drive:
+  enabled: false
+  document_ids: []

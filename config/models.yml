@@ -1,0 +1,25 @@
+schema_version: "1.0"
+
+execution:
+  mode: cli
+  timeout_seconds: 180
+  max_input_tokens_estimate: 200000
+  max_dual_runs_per_day: 3
+  target_budget_usd_per_dual_run: 1.50
+  target_budget_usd_per_day: 5.00
+  collector_max_attempts: 3
+  model_max_attempts: 2
+  retry_delays_seconds: [5, 30]
+
+claude:
+  command: /home/ubuntu/.local/bin/claude
+  model: claude-sonnet-5
+  effort: medium
+  max_budget_usd_per_run: 0.75
+  max_turns: 2
+
+openai:
+  command: /home/ubuntu/.nvm/versions/node/v24.21.0/bin/codex
+  model: gpt-5.6-terra
+  reasoning_effort: medium
+  target_budget_usd_per_run: 0.75

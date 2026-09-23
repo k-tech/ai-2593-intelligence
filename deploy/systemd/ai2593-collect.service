@@ -1,0 +1,29 @@
+[Unit]
+Description=AI-2593 read-only source collection
+Wants=network-online.target
+After=network-online.target
+OnFailure=ai2593-server-audit.service
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/codex_projects/ai-2593-intelligence
+Environment=PYTHONPATH=/home/ubuntu/codex_projects/ai-2593-intelligence
+Environment=AI2593_DATA_DIR=/home/ubuntu/codex_projects/ai-2593-intelligence/output
+Environment=AI2593_CONFIG=/home/ubuntu/codex_projects/ai-2593-intelligence/config/sources.local.yml
+Environment=AI2593_PUBLISH_MODE=disabled
+ExecStart=/usr/bin/python3 -m apps.orchestrator.cli run-live --hours 48 --scheduled
+Restart=on-failure
+RestartSec=5min
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/codex_projects/ai-2593-intelligence/output
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai2593-collect
+LogNamespace=ai2593

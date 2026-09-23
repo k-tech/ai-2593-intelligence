@@ -1,0 +1,10 @@
+[Unit]
+Description=Run AI-2593 analysis daily
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

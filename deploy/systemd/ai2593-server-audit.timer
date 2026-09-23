@@ -1,0 +1,10 @@
+[Unit]
+Description=Audit AI-2593 server daily
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

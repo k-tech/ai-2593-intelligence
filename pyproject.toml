@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-2593-intelligence"
+version = "0.1.0"
+description = "Evidence-first, replayable dual-model intelligence MVP"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+ai2593 = "apps.orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apps*", "collectors*", "analyzers*", "evaluation*", "dashboard*"]

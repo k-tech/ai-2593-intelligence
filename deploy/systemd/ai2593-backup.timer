@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up AI-2593 SQLite daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
