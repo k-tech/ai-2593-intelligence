@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS evaluations (
   reviewer TEXT NOT NULL, scores_json TEXT NOT NULL, accepted INTEGER NOT NULL,
   notes TEXT, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS risk_reviews (
+  risk_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, provider TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('supported','rejected')),
+  evidence_event_id TEXT, reviewer TEXT NOT NULL, notes TEXT, reviewed_at TEXT NOT NULL,
+  CHECK((status='supported' AND evidence_event_id IS NOT NULL) OR
+        (status='rejected' AND evidence_event_id IS NULL)),
+  FOREIGN KEY(snapshot_id) REFERENCES snapshots(snapshot_id),
+  FOREIGN KEY(evidence_event_id) REFERENCES source_events(event_id)
+);
 """
 
 
@@ -239,6 +248,24 @@ class Database:
                  notes or None, utc_now()),
             )
             return int(result.lastrowid)
+
+    def risk_reviews(self) -> dict[str, dict]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM risk_reviews").fetchall()
+        return {row["risk_id"]: dict(row) for row in rows}
+
+    def save_risk_review(self, risk_id: str, snapshot_id: str, provider: str,
+                         status: str, evidence_event_id: str | None,
+                         reviewer: str, notes: str) -> None:
+        with self.connect() as conn:
+            conn.execute("""INSERT INTO risk_reviews
+              (risk_id,snapshot_id,provider,status,evidence_event_id,reviewer,notes,reviewed_at)
+              VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(risk_id) DO UPDATE SET
+              status=excluded.status, evidence_event_id=excluded.evidence_event_id,
+              reviewer=excluded.reviewer, notes=excluded.notes,
+              reviewed_at=excluded.reviewed_at""",
+              (risk_id, snapshot_id, provider, status, evidence_event_id,
+               reviewer, notes or None, utc_now()))
 
     def paid_model_calls_today(self, today_utc: str) -> int:
         with self.connect() as conn:

@@ -39,9 +39,51 @@ class DashboardTests(unittest.TestCase):
     def test_findings_link_to_real_evidence(self) -> None:
         findings = self.dashboard.findings({})
         self.assertTrue(findings)
+        self.assertTrue(all(item["evidence_event_ids"] for item in findings))
         event_id = findings[0]["evidence_event_ids"][0]
         self.assertIsNotNone(self.dashboard.evidence(event_id))
         self.assertEqual(self.dashboard.findings({"source": "does-not-exist"}), [])
+
+    def test_uncited_risk_requires_review_before_becoming_a_finding(self) -> None:
+        risk = self.dashboard.risk_candidates()[0]
+        self.assertEqual(risk["status"], "needs_review")
+        self.assertFalse(any(item["kind"] == "risk" for item in self.dashboard.findings({})))
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.data = self.dashboard
+        handler.language = "zh"
+        handler.csrf_token = "test-csrf-token"
+        self.assertIn("待人工复核", handler._risk_reviews({}))
+
+        with self.assertRaisesRegex(ValueError, "evidence must belong"):
+            self.dashboard.review_risk(risk["risk_id"], "supported", "evt_unknown",
+                                       "tester", "")
+        event_id = self.pipeline._load_snapshot(risk["snapshot_id"])[0][0]["event_id"]
+        self.dashboard.review_risk(risk["risk_id"], "supported", event_id,
+                                   "tester", "checked source")
+        self.assertEqual(self.dashboard.risk_candidates()[0]["status"], "supported")
+        verified = [item for item in self.dashboard.findings({"risk": "1"})]
+        self.assertEqual(len(verified), 1)
+        self.assertEqual(verified[0]["evidence_event_ids"], [event_id])
+        self.assertIn(f"/evidence/{event_id}", handler._findings({"risk": "1"}))
+
+        reloaded = DashboardData(self.root, self.pipeline.var)
+        self.assertEqual(reloaded.risk_candidates()[0]["reviewer"], "tester")
+        reloaded.review_risk(risk["risk_id"], "rejected", None, "second reviewer", "not supported")
+        self.assertEqual(reloaded.findings({"risk": "1"}), [])
+        self.assertEqual(reloaded.risk_candidates()[0]["status"], "rejected")
+
+    def test_risk_review_cannot_use_event_from_another_snapshot(self) -> None:
+        values = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        subset = self.root / "subset.json"
+        subset.write_text(json.dumps(values[:1], ensure_ascii=False), encoding="utf-8")
+        second = self.pipeline.run_fixture(subset)
+        candidate = next(item for item in self.dashboard.risk_candidates()
+                         if item["snapshot_id"] == second["snapshot_id"])
+        other_event = self.pipeline._load_snapshot(self.result["snapshot_id"])[0][1]["event_id"]
+        with self.assertRaisesRegex(ValueError, "evidence must belong"):
+            self.dashboard.review_risk(candidate["risk_id"], "supported", other_event,
+                                       "tester", "")
+        self.assertEqual(self.dashboard.risk_candidates()[0]["status"], "needs_review")
 
     def test_findings_support_native_week_and_date_filters(self) -> None:
         item = self.dashboard.findings({})[0]

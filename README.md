@@ -23,9 +23,11 @@ python3 -m dashboard.server --host 127.0.0.1 --port 8080
 python3 -m unittest discover -s tests -v
 ```
 
-Dashboard 一期提供 Overview、Findings、Compare、Weekly reports、Runs、Server activity、
-`/healthz` 和只读 JSON API。Compare 页面可对 Claude/ChatGPT 分别进行六维 1–5 分评分，
-记录采纳状态和备注；评分写入 SQLite，其余管理页面保持只读。页面右上角可切换
+Dashboard 一期提供 Overview、Findings、Risk review、Compare、Weekly reports、Runs、
+Server activity、`/healthz` 和只读 JSON API。Compare 页面可对 Claude/ChatGPT 分别进行
+六维 1–5 分评分，记录采纳状态和备注。无证据风险进入 Risk review，人工绑定同一 snapshot
+的 source event 并确认后才显示在 Findings；也可驳回。评分和复核结果写入 SQLite。
+页面右上角可切换
 中文/English，并用本地 Cookie 保留选择。它只监听
 服务器 loopback；从本地电脑使用 SSH tunnel 访问：
 

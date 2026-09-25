@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from apps.orchestrator.db import Database
+from apps.orchestrator.domain import sha256_text
 from apps.orchestrator.operations import health_report
 
 
@@ -35,6 +36,10 @@ ZH = {
     "Next schedule": "下次调度", "Recent runs": "最近运行",
     "Week": "周", "Date": "日期", "Source": "来源", "All": "全部", "Topic": "主题",
     "Owner": "负责人", "Risks only": "仅看风险", "Filter": "筛选",
+    "Risk review": "风险复核", "Needs review": "待人工复核",
+    "Supported": "有证据", "Rejected": "已驳回", "Evidence event": "证据事件",
+    "Confirm with evidence": "确认并加入发现", "Reject risk": "驳回风险",
+    "No risks in this status.": "此状态下没有风险。",
     "No evidence IDs supplied": "没有提供证据 ID", "Confidence": "置信度",
     "No findings match these filters.": "没有符合筛选条件的发现。",
     "No snapshot currently has successful outputs from both providers.": "当前没有同时包含两个模型成功结果的快照。",
@@ -188,7 +193,7 @@ def _run_command(command: list[str], cwd: Path) -> tuple[bool, str]:
 
 
 class DashboardData:
-    """Read-only projection over the operational database and immutable artifacts."""
+    """Operational dashboard projection and validated human review writes."""
 
     def __init__(self, root: Path, data_dir: Path):
         self.root = root.resolve()
@@ -256,19 +261,90 @@ class DashboardData:
                     continue
                 evidence_ids = [str(item) for item in theme.get("evidence_event_ids", [])]
                 events = self.db.events_by_ids(evidence_ids)
+                if not evidence_ids or len(events) != len(set(evidence_ids)):
+                    continue
                 sources = sorted({str(event.get("source", "unknown")) for event in events})
                 findings.append({**theme, "kind": "theme", "provider": row["provider"],
                                  "snapshot_id": row["snapshot_id"], "run_id": row["run_id"],
                                  "week": week, "sources": sources})
-            for index, risk in enumerate(output.get("risks", [])):
-                if isinstance(risk, str):
-                    findings.append({
-                        "key": f"risk-{index + 1}", "title": risk, "summary": risk,
-                        "kind": "risk", "owner": "unassigned", "confidence": None,
-                        "evidence_event_ids": [], "sources": [], "provider": row["provider"],
-                        "snapshot_id": row["snapshot_id"], "run_id": row["run_id"], "week": week,
-                    })
+        for risk in self.risk_candidates():
+            if risk["status"] != "supported":
+                continue
+            event_id = risk["evidence_event_id"]
+            events = self.db.events_by_ids([event_id]) if event_id else []
+            if not events:
+                continue
+            findings.append({
+                "key": risk["risk_id"], "title": risk["text"], "summary": risk["text"],
+                "kind": "risk", "owner": "unassigned", "confidence": None,
+                "evidence_event_ids": [event_id], "sources": [events[0]["source"]],
+                "provider": risk["provider"], "snapshot_id": risk["snapshot_id"],
+                "run_id": risk["run_id"], "week": risk["week"],
+            })
         return [item for item in findings if self._matches_finding(item, filters)]
+
+    def risk_candidates(self) -> list[dict[str, Any]]:
+        reviews = self.db.risk_reviews()
+        risks: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in self._latest_successful_outputs():
+            output = _read_json(row.get("output_path"), self.data_dir)
+            if not output:
+                continue
+            for index, risk in enumerate(output.get("risks", [])):
+                if not isinstance(risk, str) or not risk.strip():
+                    continue
+                risk_id = "risk_" + sha256_text(
+                    f"{row['snapshot_id']}\0{row['provider']}\0{risk}")[:24]
+                if risk_id in seen:
+                    continue
+                seen.add(risk_id)
+                review = reviews.get(risk_id, {})
+                risks.append({
+                    "risk_id": risk_id, "text": risk, "position": index + 1,
+                    "provider": row["provider"], "snapshot_id": row["snapshot_id"],
+                    "run_id": row["run_id"], "week": str(row["started_at"])[:10],
+                    "status": review.get("status", "needs_review"),
+                    "evidence_event_id": review.get("evidence_event_id"),
+                    "reviewer": review.get("reviewer"), "notes": review.get("notes"),
+                    "reviewed_at": review.get("reviewed_at"),
+                })
+        return risks
+
+    def snapshot_events(self, snapshot_id: str) -> list[dict[str, Any]]:
+        snapshot = self.db.get_snapshot(snapshot_id)
+        if not snapshot:
+            return []
+        path = Path(snapshot["input_path"]).resolve()
+        if not path.is_relative_to(self.data_dir) or not path.is_file():
+            return []
+        try:
+            return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+        except (OSError, ValueError, json.JSONDecodeError):
+            return []
+
+    def review_risk(self, risk_id: str, status: str, evidence_event_id: str | None,
+                    reviewer: str, notes: str) -> None:
+        if status not in {"supported", "rejected"}:
+            raise ValueError("invalid review status")
+        if not reviewer.strip() or len(reviewer) > 80 or len(notes) > 2000:
+            raise ValueError("invalid reviewer or notes")
+        risk = next((item for item in self.risk_candidates()
+                     if item["risk_id"] == risk_id), None)
+        if not risk:
+            raise ValueError("risk candidate not found")
+        if status == "supported":
+            allowed = {event.get("event_id") for event in
+                       self.snapshot_events(risk["snapshot_id"])}
+            if not evidence_event_id or evidence_event_id not in allowed:
+                raise ValueError("evidence must belong to this snapshot")
+            if not self.db.events_by_ids([evidence_event_id]):
+                raise ValueError("evidence event not found")
+        else:
+            evidence_event_id = None
+        self.db.save_risk_review(risk_id, risk["snapshot_id"], risk["provider"],
+                                 status, evidence_event_id, reviewer.strip(), notes.strip())
 
     def comparison(self, snapshot_id: str | None = None) -> dict[str, Any] | None:
         grouped: dict[str, dict[str, dict[str, Any]]] = {}
@@ -465,6 +541,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._html(self._t("Overview"), self._overview())
         elif path == "/findings":
             self._html(self._t("Findings"), self._findings(query))
+        elif path == "/review-queue":
+            self._html(self._t("Risk review"), self._risk_reviews(query))
         elif path == "/compare":
             self._html(self._t("Compare"), self._compare(query.get("snapshot_id")))
         elif path == "/weekly":
@@ -483,7 +561,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib API
         parsed = urlparse(self.path)
         self.language = self._request_language()
-        if parsed.path.rstrip("/") != "/evaluations":
+        if parsed.path.rstrip("/") not in {"/evaluations", "/risk-reviews"}:
             self.send_error(404)
             return
         try:
@@ -499,6 +577,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             keep_blank_values=True).items() if items}
         if not self._valid_csrf(values.get("csrf", "")):
             self.send_error(403, "invalid CSRF token")
+            return
+        if parsed.path.rstrip("/") == "/risk-reviews":
+            try:
+                risk_id = values["risk_id"]
+                if not re.fullmatch(r"risk_[0-9a-f]{24}", risk_id):
+                    raise ValueError("invalid risk ID")
+                self.data.review_risk(
+                    risk_id, values["decision"], values.get("evidence_event_id") or None,
+                    values["reviewer"], values.get("notes", ""))
+            except (KeyError, ValueError) as exc:
+                self.send_error(400, str(exc))
+                return
+            self.send_response(303)
+            self.send_header("Location", "/review-queue?saved=1")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
             return
         score_keys = (
             "fact_accuracy", "cross_source_consistency", "actionability",
@@ -591,6 +685,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _findings(self, query: dict[str, str]) -> str:
         findings = self.data.findings(query)
+        pending = sum(item["status"] == "needs_review"
+                      for item in self.data.risk_candidates())
+        review_link = (f"<div class='notice warn'><strong>{self._t('Needs review')}: {pending}</strong>"
+                       f"<a href='/review-queue'>{self._t('Risk review')} →</a></div>")
         selected_week = query.get('week', '')
         if not re.fullmatch(r"\d{4}-W\d{2}", selected_week):
             selected_week = ""
@@ -621,7 +719,73 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <div>{evidence}</div></article>""")
         count_text = (f"来自每个模型/快照最新成功结果的 {len(findings)} 条发现。" if self.language == "zh" else
                       f"{len(findings)} findings from the latest successful output per provider/snapshot.")
-        return form + f"<p class='muted'>{count_text}</p>" + ("".join(cards) or self._empty(self._t("No findings match these filters.")))
+        return (review_link + form + f"<p class='muted'>{count_text}</p>"
+                + ("".join(cards) or self._empty(self._t("No findings match these filters."))))
+
+    def _risk_reviews(self, query: dict[str, str]) -> str:
+        all_risks = self.data.risk_candidates()
+        selected = query.get("status", "needs_review")
+        if selected not in {"needs_review", "supported", "rejected", "all"}:
+            selected = "needs_review"
+        labels = {"needs_review": "Needs review", "supported": "Supported",
+                  "rejected": "Rejected", "all": "All"}
+        tabs = "".join(
+            f"<a class='tag' href='/review-queue?status={status}'>"
+            f"{self._t(label)} ({sum(r['status'] == status for r in all_risks) if status != 'all' else len(all_risks)})</a>"
+            for status, label in labels.items())
+        risks = [risk for risk in all_risks
+                 if selected == "all" or risk["status"] == selected]
+        try:
+            page = max(1, int(query.get("page", "1")))
+        except ValueError:
+            page = 1
+        page_size = 20
+        visible = risks[(page - 1) * page_size:page * page_size]
+        csrf = self._csrf_token()
+        event_cache: dict[str, list[dict[str, Any]]] = {}
+        cards = []
+        for risk in visible:
+            snapshot_id = risk["snapshot_id"]
+            if snapshot_id not in event_cache:
+                event_cache[snapshot_id] = self.data.snapshot_events(snapshot_id)
+            options = [f"<option value=''>{self._t('Evidence event')}…</option>"]
+            for event in event_cache[snapshot_id]:
+                event_id = str(event.get("event_id", ""))
+                label = f"{event.get('source', '')} · {event.get('event_time', '')[:10]} · {event.get('title', '')[:90]}"
+                chosen = " selected" if event_id == risk["evidence_event_id"] else ""
+                options.append(f"<option value='{escape(event_id, quote=True)}'{chosen}>"
+                               f"{escape(label)}</option>")
+            evidence = (f"<a href='/evidence/{quote(risk['evidence_event_id'])}'>"
+                        f"{escape(risk['evidence_event_id'])}</a>"
+                        if risk["evidence_event_id"] else self._t("Needs review"))
+            history = (f"<p class='muted'>{escape(str(risk['reviewer']))} · "
+                       f"{escape(str(risk['reviewed_at']))} · {evidence}<br>"
+                       f"{escape(str(risk['notes'] or ''))}</p>" if risk["reviewer"] else "")
+            cards.append(f"""<article class='finding review-candidate'>
+                <div class='eyebrow'>{escape(risk['provider'])} · {escape(snapshot_id)} ·
+                {self._t(labels[risk['status']])}</div>
+                <p>{escape(risk['text'])}</p>{history}
+                <form method='post' action='/risk-reviews' class='review-form'>
+                <input type='hidden' name='csrf' value='{escape(csrf, quote=True)}'>
+                <input type='hidden' name='risk_id' value='{escape(risk['risk_id'])}'>
+                <label>{self._t('Evidence event')}<select name='evidence_event_id'>
+                {''.join(options)}</select></label>
+                <label>{self._t('Reviewer')}<input name='reviewer' maxlength='80' required></label>
+                <label>{self._t('Notes')}<textarea name='notes' maxlength='2000' rows='2'></textarea></label>
+                <div class='review-actions'><button name='decision' value='supported'>
+                {self._t('Confirm with evidence')}</button><button name='decision' value='rejected'>
+                {self._t('Reject risk')}</button></div></form></article>""")
+        links = []
+        if page > 1:
+            links.append(f"<a href='/review-queue?status={selected}&page={page - 1}'>←</a>")
+        if page * page_size < len(risks):
+            links.append(f"<a href='/review-queue?status={selected}&page={page + 1}'>→</a>")
+        saved = self._notice(self._t("Risk review"),
+                             "复核结果已保存。" if self.language == "zh" else "Review saved.",
+                             "ok") if query.get("saved") == "1" else ""
+        return (saved + f"<div class='report-list'>{tabs}</div>"
+                + ("".join(cards) or self._empty(self._t("No risks in this status.")))
+                + f"<div class='review-actions'>{''.join(links)}</div>")
 
     def _compare(self, snapshot_id: str | None) -> str:
         value = self.data.comparison(snapshot_id)
@@ -796,6 +960,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _html(self, title: str, body: str) -> None:
         nav = "".join(f"<a href='{path}'>{label}</a>" for path, label in (
             ("/", self._t("Overview")), ("/findings", self._t("Findings")),
+            ("/review-queue", self._t("Risk review")),
             ("/compare", self._t("Compare")), ("/weekly", self._t("Weekly reports")),
             ("/runs", self._t("Runs")),
             ("/server-activity", self._t("Server activity"))))
@@ -869,6 +1034,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         .finding{margin:12px 0}.tag{display:inline-block;margin:3px;text-decoration:none}.compare{display:grid;grid-template-columns:1fr 1fr;gap:18px}.compare-column ol{padding-left:20px}.metrics{padding:8px;background:var(--lime);border-radius:6px}
         .metric-table{margin:18px 0}.metric-table th:first-child{width:190px}.metric-bar{height:6px;background:#edf1ee;border-radius:9px;margin-top:7px;overflow:hidden}.metric-bar i{display:block;height:100%;background:var(--green)}
         .review-panel{background:white;border:1px solid var(--line);border-radius:10px;padding:18px}.review-form{display:flex;flex-direction:column;gap:12px}.score-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.check{flex-direction:row;align-items:center}.review-history{padding-left:20px}.review-history li{margin:10px 0}
+        .review-candidate{border-left:4px solid #d09200}.review-actions{display:flex;gap:12px;flex-wrap:wrap}.review-actions button[value='rejected']{background:#f3f5f3;color:var(--ink);border-color:var(--line)}
         .report-list{margin-bottom:16px}.markdown-preview{background:white;border:1px solid var(--line);border-radius:10px;padding:clamp(20px,4vw,44px);font-size:15px;line-height:1.7}.markdown-preview h1{font-size:30px;margin:0 0 24px}.markdown-preview h2{font-size:22px;border-bottom:1px solid var(--line);padding-bottom:8px;margin:34px 0 14px}.markdown-preview h3{font-size:17px;margin-top:24px}.markdown-preview p{max-width:1000px}.markdown-preview li{margin:6px 0}.markdown-preview code{background:#edf1ee;border-radius:4px;padding:2px 5px;font-size:.92em}.markdown-preview .table-wrap{margin:18px 0}.markdown-preview table{min-width:720px}
         .status.succeeded{background:var(--lime);color:#245112}.status.failed{background:#ffe0dc;color:#8b1d12}.status.partial,.status.running{background:var(--amber);color:#664c00}
         pre{overflow:auto;white-space:pre-wrap;word-break:break-word;background:#13221d;color:#e6f0eb;padding:16px;border-radius:8px;max-height:460px}.path{font-family:ui-monospace,monospace;word-break:break-all}.empty{padding:28px;border:1px dashed #b7c3bc;color:var(--muted);text-align:center;border-radius:10px}
