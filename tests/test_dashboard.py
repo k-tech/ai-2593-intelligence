@@ -104,6 +104,19 @@ class DashboardTests(unittest.TestCase):
         value = self.dashboard.comparison(self.result["snapshot_id"])
         self.assertEqual(set(value["models"]), {"anthropic", "openai"})
         self.assertEqual(value["snapshot_id"], self.result["snapshot_id"])
+        option = value["snapshot_options"][0]
+        self.assertEqual(option["snapshot_id"], self.result["snapshot_id"])
+        self.assertRegex(option["date_label"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(option["event_count"], 3)
+
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.data = self.dashboard
+        handler.language = "zh"
+        handler.csrf_token = "test-csrf-token"
+        html = handler._compare(self.result["snapshot_id"])
+        self.assertIn(f"value='{self.result['snapshot_id']}'", html)
+        self.assertNotIn(f">{self.result['snapshot_id']}</option>", html)
+        self.assertIn("条事件", html)
 
     def test_run_detail_includes_steps_models_and_manifest(self) -> None:
         value = self.dashboard.run_detail(self.result["run_id"])

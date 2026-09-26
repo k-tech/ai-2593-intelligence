@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
@@ -14,6 +14,7 @@ import hmac
 import subprocess
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
+from zoneinfo import ZoneInfo
 
 from apps.orchestrator.db import Database
 from apps.orchestrator.domain import sha256_text
@@ -63,6 +64,9 @@ ZH = {
     "Duration": "耗时", "Input tokens": "输入 token", "Output tokens": "输出 token",
     "Total tokens": "总 token", "Cost": "成本", "Attempts": "尝试次数",
     "Quality average": "质量均分", "No reviews yet.": "暂无人工评分。",
+    "Daily analysis": "日报", "Weekly analysis": "周报", "Live analysis": "即时分析",
+    "Replay": "回放", "Fixture": "测试", "Analysis": "分析",
+    "events": "条事件", "Created": "生成于", "Beijing time": "北京时间",
     "Run": "运行", "Trigger": "触发方式", "Status": "状态", "Started": "开始时间",
     "Snapshot": "快照", "Error": "错误", "Step": "步骤", "Attempts": "尝试次数",
     "Unit": "单元", "Active": "活动状态", "Enabled": "启用状态", "Next": "下次执行",
@@ -371,8 +375,11 @@ class DashboardData:
                 run_ids).fetchall()]
         for evaluation in evaluations:
             evaluation["scores"] = self._decode_json(evaluation.get("scores_json")) or {}
+        snapshot_options = [self._snapshot_option(item, grouped[item]["anthropic"])
+                            for item in candidates]
         return {
             "snapshot_id": selected, "available_snapshots": candidates,
+            "snapshot_options": snapshot_options,
             "models": model_rows, "outputs": outputs,
             "difference": {
                 "theme_overlap": len(left_keys & right_keys) / len(union) if union else 1.0,
@@ -381,6 +388,31 @@ class DashboardData:
                 "openai_only": sorted(right_keys - left_keys),
             }, "evaluations": evaluations,
         }
+
+    def _snapshot_option(self, snapshot_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self.db.get_snapshot(snapshot_id) or {}
+        created_at = snapshot.get("created_at") or row["started_at"]
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(
+            ZoneInfo("Asia/Shanghai"))
+        manifest = _read_json(row.get("manifest_path"), self.data_dir) or {}
+        window = manifest.get("window") or {}
+        kind = {"daily-analysis": "Daily analysis", "weekly-analysis": "Weekly analysis",
+                "live-analysis": "Live analysis", "fixture": "Fixture",
+                "replay": "Replay", "failed-step-replay": "Replay"}.get(
+                    row.get("trigger_type"), "Analysis")
+        date_label = created.strftime("%Y-%m-%d")
+        try:
+            start = datetime.fromisoformat(window["local_start"])
+            end = datetime.fromisoformat(window["local_end"])
+            if kind == "Weekly analysis":
+                date_label = f"{start:%Y-%m-%d}—{end - timedelta(days=1):%Y-%m-%d}"
+            else:
+                date_label = start.strftime("%Y-%m-%d")
+        except (KeyError, TypeError, ValueError):
+            pass
+        return {"snapshot_id": snapshot_id, "date_label": date_label,
+                "kind": kind, "event_count": snapshot.get("event_count", 0),
+                "created_time": created.strftime("%m-%d %H:%M")}
 
     def add_evaluation(self, run_id: str, provider: str, reviewer: str,
                        scores: dict[str, int], accepted: bool, notes: str) -> int:
@@ -458,7 +490,7 @@ class DashboardData:
 
     def _latest_successful_outputs(self) -> list[dict[str, Any]]:
         with self.db.connect() as conn:
-            rows = conn.execute("""SELECT m.*,r.started_at FROM model_runs m
+            rows = conn.execute("""SELECT m.*,r.started_at,r.trigger_type,r.manifest_path FROM model_runs m
               JOIN runs r ON r.run_id=m.run_id
               WHERE m.status='succeeded' AND m.output_path IS NOT NULL
               ORDER BY r.started_at DESC,m.id DESC""").fetchall()
@@ -792,9 +824,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not value:
             return self._empty(self._t("No snapshot currently has successful outputs from both providers."))
         options = "".join(
-            f"<option value='{escape(item)}' {'selected' if item == value['snapshot_id'] else ''}>{escape(item)}</option>"
-            for item in value["available_snapshots"])
-        selector = f"<form method='get' class='filters'><label>{self._t('Snapshot')} <select name='snapshot_id'>{options}</select></label><button>{self._t('Compare')}</button></form>"
+            f"<option value='{escape(item['snapshot_id'], quote=True)}' "
+            f"{'selected' if item['snapshot_id'] == value['snapshot_id'] else ''}>"
+            f"{escape(item['date_label'])} · {escape(self._t(item['kind']))} · "
+            f"{item['event_count']} {self._t('events')} · "
+            f"{self._t('Created')} {escape(item['created_time'])}</option>"
+            for item in value["snapshot_options"])
+        selector = (f"<form method='get' class='filters'><label>{self._t('Snapshot')} "
+                    f"<select name='snapshot_id'>{options}</select></label>"
+                    f"<button>{self._t('Compare')}</button>"
+                    f"<span class='muted'>{self._t('Beijing time')}</span></form>")
         diff = value["difference"]
         difference_text = (f"{diff['theme_overlap']:.0%} · 共同：{', '.join(diff['shared']) or '无'} · 仅 Claude：{', '.join(diff['anthropic_only']) or '无'} · 仅 ChatGPT：{', '.join(diff['openai_only']) or '无'}"
                            if self.language == "zh" else

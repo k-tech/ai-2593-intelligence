@@ -10,3 +10,5 @@ Risk review，标记为 `needs_review`；人工只能绑定同一 snapshot 内�
 
 Weekly 将 Markdown 周报安全渲染为只读预览（标题、列表、链接和对比表格），不会提供
 编辑入口。Findings 支持浏览器原生的 ISO 周选择器和日期日历选择器。
+Compare 的快照选择器按北京时间显示分析日期或周窗口、分析类型、事件数和生成时间；
+底层 `snapshot_id` 保持内容哈希，供去重、证据关联和 replay 使用。
