@@ -20,14 +20,14 @@ from collectors.feedmob.fixture import FixtureCollector
 from collectors.feedmob.normalizer import content_hash, normalize, redact
 from collectors.feedmob.live import FeedMobLiveCollector
 from evaluation.compare import compare_outputs
-from evaluation.validation import validate_analysis
+from evaluation.validation import validate_analysis, validate_chinese_analysis
 
 from .artifacts import ArtifactStore
 from .db import Database
 from .domain import AdapterResult, AnalysisRequest, canonical_json, sha256_text, utc_now
 
 
-PROMPT_VERSION = "analysis-v2"
+PROMPT_VERSION = "analysis-v3"
 
 
 class PipelineBusyError(RuntimeError):
@@ -470,6 +470,8 @@ class Pipeline:
             output = self._enrich_output(result, request.prompt_version)
             errors = (validate_analysis(output, evidence_ids, set(request.allowed_owners))
                       if output is not None else ["no output"])
+            if output is not None and self.adapter_mode == "cli" and request.prompt_version == "analysis-v3":
+                errors.extend(validate_chinese_analysis(output))
             final = (result, output, errors, attempt)
             succeeded = result.exit_code == 0 and not errors
             schema_retry = result.exit_code == 0 and bool(errors)

@@ -14,6 +14,26 @@ SENSITIVE_PATTERNS = [
     re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
     re.compile(r"(?i)\b(?:api[_-]?key|token|password)\s*[:=]\s*[^\s,;]+"),
 ]
+HAN_RE = re.compile(r"[\u3400-\u9fff]")
+
+
+def validate_chinese_analysis(output: Any) -> list[str]:
+    """Reject English-only reader-facing fields; preserve IDs, owners and proper names."""
+    if not isinstance(output, dict):
+        return []
+    fields: list[tuple[str, Any]] = [("executive_summary", output.get("executive_summary"))]
+    themes = output.get("themes")
+    if isinstance(themes, list):
+        for index, theme in enumerate(themes):
+            if isinstance(theme, dict):
+                fields.extend((f"themes[{index}].{key}", theme.get(key)) for key in
+                              ("title", "summary", "why_it_matters", "next_action"))
+    for key in ("risks", "experiments", "followups"):
+        values = output.get(key)
+        if isinstance(values, list):
+            fields.extend((f"{key}[{index}]", value) for index, value in enumerate(values))
+    return [f"{path} must be written in Chinese" for path, value in fields
+            if isinstance(value, str) and value.strip() and len(HAN_RE.findall(value)) < 2]
 
 
 def validate_analysis_content(output: Any, event_ids: set[str],

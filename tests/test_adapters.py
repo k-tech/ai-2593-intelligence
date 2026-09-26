@@ -9,10 +9,11 @@ import tempfile
 from analyzers.claude.adapter import ClaudeAdapter, _claude_content_schema, _claude_input_tokens
 from analyzers.openai.adapter import OpenAIAdapter, _usage_from_jsonl
 from apps.orchestrator.domain import AnalysisRequest
+from apps.orchestrator.pipeline import PROMPT_VERSION
 
 
 def _request(size: int = 200_000) -> AnalysisRequest:
-    return AnalysisRequest("snap_test", "x" * size, [], "analysis-v2", "instructions")
+    return AnalysisRequest("snap_test", "x" * size, [], PROMPT_VERSION, "instructions")
 
 
 class OpenAIAdapterTests(unittest.TestCase):

@@ -3,7 +3,9 @@
 ## 输入
 
 每个采集窗口生成一份内容寻址的不可变 JSONL snapshot。Claude 与 OpenAI 并行读取同一个
-`AnalysisRequest`，包含相同的 `snapshot_id`、模型输入、`analysis-v2` prompt 和证据集合。
+`AnalysisRequest`，包含相同的 `snapshot_id`、模型输入、`analysis-v3` prompt 和证据集合。
+v3 要求面向读者的字段使用简体中文；CLI 结果在结构校验后还会检查这些字段，
+不合格时按模型重试策略处理，不能作为成功结果进入 Dashboard。
 
 ## Adapter
 

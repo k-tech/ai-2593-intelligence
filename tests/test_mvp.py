@@ -15,7 +15,7 @@ from apps.orchestrator.pipeline import PROMPT_VERSION, Pipeline, PipelineBusyErr
 from apps.orchestrator.cli import collection_bucket, main as cli_main, period_window
 from datetime import datetime, timezone
 from collectors.feedmob.normalizer import redact
-from evaluation.validation import validate_analysis, validate_analysis_content
+from evaluation.validation import validate_analysis, validate_analysis_content, validate_chinese_analysis
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +43,58 @@ class RedactionTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_chinese_output_preserves_english_identifiers_and_proper_names(self) -> None:
+        output = {
+            "executive_summary": "Capital One 的归因问题需要处理。",
+            "themes": [{"key": "capital-one-attribution", "title": "Capital One 归因风险",
+                        "summary": "CTV 转化归因仍有缺口。", "why_it_matters": "会影响后续投放。",
+                        "next_action": "请刘确认测量方案。", "owner": "Liu",
+                        "evidence_event_ids": ["evt_english_id"]}],
+            "risks": ["客户可能暂停投放。"], "experiments": [], "followups": [],
+        }
+        self.assertEqual(validate_chinese_analysis(output), [])
+        output["executive_summary"] = "Capital One attribution remains unresolved."
+        output["themes"][0]["summary"] = "Measurement is unclear."
+        self.assertEqual(validate_chinese_analysis(output), [
+            "executive_summary must be written in Chinese",
+            "themes[0].summary must be written in Chinese",
+        ])
+
+    def test_cli_retries_english_output_and_records_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "prompts").mkdir()
+            (root / "config").mkdir()
+            (root / "prompts" / f"{PROMPT_VERSION}.md").write_text(
+                (PROJECT_ROOT / "prompts" / f"{PROMPT_VERSION}.md").read_text(encoding="utf-8"),
+                encoding="utf-8")
+            (root / "config/models.yml").write_text(
+                (PROJECT_ROOT / "config/models.yml").read_text(encoding="utf-8"), encoding="utf-8")
+            pipeline = Pipeline(root, adapter_mode="cli", allow_paid_models=True,
+                                providers={"anthropic"})
+            pipeline.retry_delays = [0]
+
+            class EnglishAdapter:
+                provider = "anthropic"
+                model = "test-model"
+                calls = 0
+
+                def analyze(self, request):
+                    self.calls += 1
+                    return AdapterResult(self.provider, self.model, {
+                        "executive_summary": "This is an English result.", "themes": [],
+                        "risks": [], "experiments": [], "followups": [],
+                    }, 1, 0, input_tokens=1, output_tokens=1)
+
+            adapter = EnglishAdapter()
+            pipeline.adapters = [adapter]
+            result = pipeline.run_fixture(FIXTURE)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(adapter.calls, 2)
+            self.assertEqual(result["models"][0]["attempts"], 2)
+            self.assertTrue(any("must be written in Chinese" in error
+                                for error in result["models"][0]["errors"]))
+
     def test_unknown_evidence_is_rejected(self) -> None:
         output = {
             "executive_summary": "summary",

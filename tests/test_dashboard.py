@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from dashboard.server import DashboardData, DashboardHandler, render_markdown_preview
-from apps.orchestrator.pipeline import Pipeline
+from apps.orchestrator.pipeline import PROMPT_VERSION, Pipeline
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +20,7 @@ class DashboardTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "prompts").mkdir()
         (self.root / "config").mkdir()
-        for relative in ("prompts/analysis-v2.md", "config/models.yml"):
+        for relative in (f"prompts/{PROMPT_VERSION}.md", "config/models.yml"):
             target = self.root / relative
             target.write_text((PROJECT_ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
         self.pipeline = Pipeline(self.root)
