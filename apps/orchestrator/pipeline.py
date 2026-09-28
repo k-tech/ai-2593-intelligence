@@ -138,7 +138,19 @@ class Pipeline:
                 return {"run_id": run_id, "status": "unavailable", "events": 0,
                         "window": {"start_utc": start_utc, "end_utc": end_utc},
                         "models_called": 0}
-            snapshot_id, model_events, _ = self._build_snapshot(events)
+            weekly_input = None
+            daily_inputs = None
+            if period == "weekly-analysis":
+                weekly_input, daily_inputs = self._weekly_input(start_utc, end_utc, events)
+                if not daily_inputs["used"]:
+                    self.db.create_run(run_id, period)
+                    self.db.step(run_id, "build-snapshot", "skipped", "no successful daily analysis outputs")
+                    self.db.finish_run(run_id, "unavailable", error="no successful daily analysis outputs")
+                    return {"run_id": run_id, "status": "unavailable", "events": len(events),
+                            "window": {"start_utc": start_utc, "end_utc": end_utc},
+                            "models_called": 0}
+            snapshot_id, model_events, _ = self._build_snapshot(
+                events, analysis_input=weekly_input, input_metadata=daily_inputs)
             if dry_run:
                 self.db.create_run(run_id, period + "-dry-run")
                 self.db.step(run_id, "build-snapshot", "succeeded")
@@ -160,6 +172,75 @@ class Pipeline:
                       "local_start": local_start.isoformat(), "local_end": local_end.isoformat()}
             return self._execute(None, snapshot_id, period, run_id=run_id,
                                  report_name=report_name, window=window)
+
+    def _weekly_input(self, start_utc: str, end_utc: str,
+                      events: list[dict]) -> tuple[str, dict]:
+        """Use successful daily model results in the week, with source IDs for citations."""
+        shanghai = ZoneInfo("Asia/Shanghai")
+        start = datetime.fromisoformat(start_utc.replace("Z", "+00:00")).astimezone(shanghai)
+        end = datetime.fromisoformat(end_utc.replace("Z", "+00:00")).astimezone(shanghai)
+        days = [(start + timedelta(days=offset)).date().isoformat()
+                for offset in range((end.date() - start.date()).days)]
+        evidence_ids = {event["event_id"] for event in events
+                        if event["sensitivity"] != "restricted"}
+        with self.db.connect() as conn:
+            rows = [dict(row) for row in conn.execute("""SELECT r.run_id,r.started_at,r.manifest_path,
+                m.provider,m.output_path FROM runs r JOIN model_runs m ON m.run_id=r.run_id
+                WHERE r.trigger_type='daily-analysis' AND m.status='succeeded'
+                ORDER BY r.started_at DESC""").fetchall()]
+        selected: dict[tuple[str, str], dict] = {}
+        for row in rows:
+            manifest_path = Path(row["manifest_path"] or "")
+            output_path = Path(row["output_path"] or "")
+            if not (manifest_path.is_file() and output_path.is_file()
+                    and manifest_path.resolve().is_relative_to(self.var)
+                    and output_path.resolve().is_relative_to(self.var)):
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                daily_window = manifest["window"]
+                local_start = datetime.fromisoformat(daily_window["local_start"])
+                local_end = datetime.fromisoformat(daily_window["local_end"])
+                if (local_start.hour != 0 or local_start.minute != 0
+                        or local_end - local_start != timedelta(days=1)
+                        or local_start.astimezone(timezone.utc) != datetime.fromisoformat(
+                            daily_window["start_utc"].replace("Z", "+00:00"))
+                        or local_end.astimezone(timezone.utc) != datetime.fromisoformat(
+                            daily_window["end_utc"].replace("Z", "+00:00"))):
+                    continue
+                day = local_start.date().isoformat()
+                if day not in days or (day, row["provider"]) in selected:
+                    continue
+                output = json.loads(output_path.read_text(encoding="utf-8"))
+                if not isinstance(output, dict):
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            result = {key: output.get(key) for key in (
+                "executive_summary", "risks", "experiments", "followups")}
+            result["themes"] = []
+            for theme in output.get("themes", []):
+                if not isinstance(theme, dict):
+                    continue
+                ids = [item for item in theme.get("evidence_event_ids", [])
+                       if item in evidence_ids]
+                if ids:
+                    result["themes"].append({**theme, "evidence_event_ids": ids})
+            selected[(day, row["provider"])] = {
+                "day": day, "provider": row["provider"], "run_id": row["run_id"],
+                "result": result}
+        used = [selected[key] for key in sorted(selected)]
+        covered_days = {item["day"] for item in used}
+        metadata = {"used": [{key: item[key] for key in ("day", "provider", "run_id")}
+                             for item in used],
+                    "missing_days": [day for day in days if day not in covered_days],
+                    "missing_models": [{"day": day, "provider": provider}
+                                       for day in days for provider in ("anthropic", "openai")
+                                       if (day, provider) not in selected]}
+        header = {"kind": "weekly-daily-results", "start_utc": start_utc,
+                  "end_utc": end_utc, "missing_days": metadata["missing_days"],
+                  "missing_models": metadata["missing_models"]}
+        return "\n".join(canonical_json(item) for item in [header, *used]) + "\n", metadata
 
     def refresh_redaction(self, snapshot_id: str) -> dict:
         """Re-normalize a snapshot from private raw artifacts without calling models."""
@@ -293,6 +374,13 @@ class Pipeline:
                 events, model_input = self._load_snapshot(snapshot_id)
 
             prompt = self.prompt_path.read_text(encoding="utf-8")
+            snapshot_record = self.db.get_snapshot(snapshot_id)
+            snapshot_manifest = json.loads(Path(snapshot_record["manifest_path"]).read_text(
+                encoding="utf-8")) if snapshot_record else {}
+            if snapshot_manifest.get("analysis_input_path"):
+                prompt += ("\n\n本次输入是上一自然周每日成功分析的结构化结果。综合每日结论，"
+                           "识别跨日趋势和优先级；明确指出缺失的日期。只能引用输入中已有的"
+                           "evidence_event_ids，不要将日报文字当作原始事件，也不要补写未提供的事实。")
             estimated_tokens = self._estimate_input_tokens(model_input)
             if estimated_tokens > self.max_input_tokens_estimate:
                 raise ValueError(
@@ -367,7 +455,8 @@ class Pipeline:
                 "status": status, "created_at": utc_now(), "snapshot_id": snapshot_id,
                 "snapshot_manifest_path": snapshot_record.get("manifest_path"),
                 "snapshot_input_path": snapshot_record.get("input_path"),
-                "snapshot_input_sha256": sha256_text(model_input),
+                "snapshot_input_sha256": snapshot_manifest.get("model_input_sha256"),
+                "analysis_input_sha256": sha256_text(model_input),
                 "prompt_version": PROMPT_VERSION, "prompt_sha256": sha256_text(prompt),
                 "prompt_path": str(self.prompt_path), "working_directory": str(self.root),
                 "models": model_summaries, "comparison_path": comparison_path,
@@ -522,7 +611,9 @@ class Pipeline:
         except Exception:
             return
 
-    def _build_snapshot(self, events: list[dict] | None = None) -> tuple[str, list[dict], str]:
+    def _build_snapshot(self, events: list[dict] | None = None,
+                        analysis_input: str | None = None,
+                        input_metadata: dict | None = None) -> tuple[str, list[dict], str]:
         events = self.db.events() if events is None else events
         if not events:
             raise ValueError("cannot build an empty snapshot")
@@ -530,24 +621,52 @@ class Pipeline:
             "event_id", "source", "event_time", "title", "text", "participants", "tags", "sensitivity"
         )} for event in events if event["sensitivity"] != "restricted"]
         model_input = "\n".join(canonical_json(event) for event in model_events) + "\n"
-        snapshot_id = "snap_" + sha256_text(model_input)[:24]
+        input_digest = sha256_text(model_input)
+        analysis_digest = sha256_text(analysis_input) if analysis_input is not None else None
+        existing = self.db.snapshots()
+        for row in existing:
+            try:
+                old_manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (old_manifest.get("model_input_sha256") == input_digest
+                    and old_manifest.get("analysis_input_sha256") == analysis_digest):
+                return row["snapshot_id"], model_events, analysis_input or model_input
+        date_label = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        base_id = f"snap{date_label}"
+        used = {row["snapshot_id"] for row in existing}
+        snapshot_id = base_id
+        sequence = 2
+        while snapshot_id in used:
+            snapshot_id = f"{base_id}-{sequence}"
+            sequence += 1
         manifest = {
             "schema_version": "1.0", "snapshot_id": snapshot_id, "created_at": utc_now(),
-            "model_input_sha256": sha256_text(model_input), "event_count": len(model_events),
+            "model_input_sha256": input_digest, "event_count": len(model_events),
             "event_revisions": [{"event_id": e["event_id"], "content_sha256": e["content_sha256"]} for e in events],
             "sorting": "event_time,event_id", "excluded_restricted": len(events) - len(model_events),
         }
-        _, manifest_path = self.artifacts.put_json("snapshot-manifest", manifest)
-        _, input_path = self.artifacts.put_text("snapshot-input", model_input, ".jsonl")
+        if analysis_input is not None:
+            analysis_path = self.artifacts.put_named_text(
+                "snapshot-analysis-input", f"{snapshot_id}.jsonl", analysis_input)
+            manifest.update({"analysis_input_sha256": analysis_digest,
+                             "analysis_input_path": str(analysis_path),
+                             "daily_inputs": input_metadata})
+        manifest_path = self.artifacts.put_named_text(
+            "snapshot-manifest", f"{snapshot_id}.json", canonical_json(manifest) + "\n")
+        input_path = self.artifacts.put_named_text("snapshot-input", f"{snapshot_id}.jsonl", model_input)
         self.db.save_snapshot(snapshot_id, str(manifest_path), str(input_path), len(model_events))
-        return snapshot_id, model_events, model_input
+        return snapshot_id, model_events, analysis_input or model_input
 
     def _load_snapshot(self, snapshot_id: str) -> tuple[list[dict], str]:
         row = self.db.get_snapshot(snapshot_id)
         if row is None:
             raise ValueError(f"snapshot not found: {snapshot_id}")
-        model_input = Path(row["input_path"]).read_text(encoding="utf-8")
-        return [json.loads(line) for line in model_input.splitlines() if line], model_input
+        event_input = Path(row["input_path"]).read_text(encoding="utf-8")
+        manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+        analysis_path = manifest.get("analysis_input_path")
+        model_input = Path(analysis_path).read_text(encoding="utf-8") if analysis_path else event_input
+        return [json.loads(line) for line in event_input.splitlines() if line], model_input
 
     def _render_report(self, run_id: str, snapshot_id: str, events: list[dict],
                        outputs: dict[str, dict], comparison: dict | None,

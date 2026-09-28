@@ -43,9 +43,12 @@ def build_weekly_report(root: Path, data_dir: Path, analysis: dict[str, Any],
 
     snapshot = db.get_snapshot(analysis["snapshot_id"])
     events = []
+    daily_inputs = {}
     if snapshot:
         events = [json.loads(line) for line in Path(snapshot["input_path"]).read_text(
             encoding="utf-8").splitlines() if line]
+        daily_inputs = json.loads(Path(snapshot["manifest_path"]).read_text(
+            encoding="utf-8")).get("daily_inputs") or {}
     source_counts = {source: sum(event.get("source") == source for event in events)
                      for source in SOURCE_NAMES}
     covered = sum(count > 0 for count in source_counts.values())
@@ -88,6 +91,16 @@ def build_weekly_report(root: Path, data_dir: Path, analysis: dict[str, Any],
     lines.extend(["## 来源覆盖率", "",
                   f"- 覆盖来源：{covered}/{len(SOURCE_NAMES)}（{covered / len(SOURCE_NAMES):.0%}）",
                   f"- 事件总数：{len(events)}"])
+    if daily_inputs:
+        used_days = {item["day"] for item in daily_inputs.get("used", [])}
+        lines.append(f"- 纳入分析的日报日期：{len(used_days)}/7")
+        if daily_inputs.get("missing_days"):
+            lines.append(f"- 缺少日报结果：{', '.join(daily_inputs['missing_days'])}")
+        partial_days = [item for item in daily_inputs.get("missing_models", [])
+                        if item["day"] not in daily_inputs.get("missing_days", [])]
+        if partial_days:
+            lines.append("- 部分日报缺少模型结果：" + ", ".join(
+                f"{item['day']} {item['provider']}" for item in partial_days))
     lines.extend(f"- {source}: {source_counts[source]}（{'covered' if source_counts[source] else 'empty'}）"
                  for source in SOURCE_NAMES)
 

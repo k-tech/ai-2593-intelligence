@@ -4,7 +4,7 @@
 
 - 从脱敏 fixture 采集 Slack、Fireflies、Email 事件；
 - SQLite revision 去重和运行审计；
-- 内容寻址的不可变 snapshot；
+- 按北京时间日期命名、用输入哈希去重的不可变 snapshot；
 - Claude/OpenAI 并行 ModelAdapter（fake 或受限 CLI）；
 - 统一输入、可信 `model_meta`、输出 schema、证据 ID、owner 和敏感信息校验；
 - 模型差异、固定周报、health check 和带人工评分闭环的内部 Dashboard；
@@ -75,3 +75,6 @@ python3 -m apps.orchestrator.cli run-live-analysis --hours 24 --allow-paid-model
 风险、实验、跟进、Git 变更、Dashboard 链接以及模型质量/耗时/token/成本对比。真实周报
 默认不进入普通 Git staging；只有设置 `AI2593_GITHUB_PUBLISH=enabled` 且发布器确认目标仓库
 已认证并为 private 时，才会 force-add 指定报告并推送。
+
+周分析使用该周成功的每日分析结果作为模型输入，不再把整周事件正文发给模型。周快照仍保存
+原始事件索引以校验证据并计算来源覆盖率；周报列出缺失的日报日期或模型结果。

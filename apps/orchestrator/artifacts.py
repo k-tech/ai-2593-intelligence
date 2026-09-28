@@ -23,5 +23,16 @@ class ArtifactStore:
     def put_json(self, kind: str, value: object) -> tuple[str, Path]:
         return self.put_text(kind, canonical_json(value) + "\n", ".json")
 
+    def put_named_text(self, kind: str, name: str, value: str) -> Path:
+        path = self.root / kind / name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.exists():
+            if path.read_text(encoding="utf-8") != value:
+                raise ValueError(f"artifact name already exists: {name}")
+        else:
+            path.write_text(value, encoding="utf-8")
+            path.chmod(0o600)
+        return path
+
     def read_json(self, path: str | Path) -> object:
         return json.loads(Path(path).read_text(encoding="utf-8"))

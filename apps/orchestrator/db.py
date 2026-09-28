@@ -223,6 +223,11 @@ class Database:
             row = conn.execute("SELECT * FROM snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
         return dict(row) if row else None
 
+    def snapshots(self) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM snapshots ORDER BY created_at, snapshot_id").fetchall()
+        return [dict(row) for row in rows]
+
     def save_model_run(self, values: dict) -> None:
         columns = ("run_id", "snapshot_id", "provider", "model", "prompt_version", "status",
                    "duration_ms", "exit_code", "input_tokens", "output_tokens", "cost_usd",
@@ -270,8 +275,8 @@ class Database:
     def paid_model_calls_today(self, today_utc: str) -> int:
         with self.connect() as conn:
             row = conn.execute("""SELECT COALESCE(SUM(CASE
-                WHEN m.duration_ms>=1000 OR m.input_tokens IS NOT NULL
-                     OR m.output_tokens IS NOT NULL OR m.cost_usd IS NOT NULL
+                WHEN m.status='succeeded' OR m.output_path IS NOT NULL
+                     OR m.input_tokens>0 OR m.output_tokens>0 OR m.cost_usd>0
                 THEN m.attempts ELSE 0 END),0) FROM model_runs m
               JOIN runs r ON r.run_id=m.run_id
               WHERE substr(r.started_at,1,10)=? AND m.model NOT LIKE 'fake-%'""",

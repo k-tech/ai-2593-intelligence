@@ -118,6 +118,22 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn(f">{self.result['snapshot_id']}</option>", html)
         self.assertIn("条事件", html)
 
+    def test_old_snapshot_id_is_shown_as_date_name(self) -> None:
+        old_id = "snap_7cd16781a8ffe1fdc83dfabb"
+        with self.pipeline.db.connect() as conn:
+            conn.execute("UPDATE snapshots SET snapshot_id=? WHERE snapshot_id=?",
+                         (old_id, self.result["snapshot_id"]))
+            conn.execute("UPDATE runs SET snapshot_id=? WHERE snapshot_id=?",
+                         (old_id, self.result["snapshot_id"]))
+        handler = DashboardHandler.__new__(DashboardHandler)
+        handler.data = self.dashboard
+        handler.language = "zh"
+        name = self.dashboard.snapshot_name(old_id)
+        self.assertRegex(name, r"^snap\d{4}-\d{2}-\d{2}-\d{6}$")
+        html = handler._runs_table(self.dashboard.runs())
+        self.assertIn(name, html)
+        self.assertNotIn(old_id, html)
+
     def test_run_detail_includes_steps_models_and_manifest(self) -> None:
         value = self.dashboard.run_detail(self.result["run_id"])
         self.assertTrue(value["steps"])

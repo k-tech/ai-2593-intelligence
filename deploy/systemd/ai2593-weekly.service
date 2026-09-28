@@ -25,6 +25,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/home/ubuntu/codex_projects/ai-2593-intelligence/output
 ReadWritePaths=/home/ubuntu/codex_projects/ai-2593-intelligence/reports
+ReadWritePaths=/home/ubuntu/.codex
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ai2593-weekly

@@ -139,6 +139,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(second["inserted"], 0)
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
         self.assertEqual(first["snapshot_id"], replay["snapshot_id"])
+        self.assertRegex(first["snapshot_id"], r"^snap\d{4}-\d{2}-\d{2}$")
+        snapshot = pipeline.db.get_snapshot(first["snapshot_id"])
+        self.assertEqual(Path(snapshot["input_path"]).name, first["snapshot_id"] + ".jsonl")
+        self.assertEqual(Path(snapshot["manifest_path"]).name, first["snapshot_id"] + ".json")
         self.assertEqual(first["status"], "succeeded")
         self.assertTrue(Path(first["manifest_path"]).exists())
         for model in first["models"]:
@@ -158,6 +162,7 @@ class PipelineTests(unittest.TestCase):
         changed_path = self.root / "changed.json"
         changed_path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
         result = pipeline.run_fixture(changed_path)
+        self.assertRegex(result["snapshot_id"], r"^snap\d{4}-\d{2}-\d{2}-2$")
         self.assertEqual(result["inserted"], 1)
         self.assertEqual(result["events"], 3)
         event = next(item for item in pipeline.db.events() if item["external_id"] == "slack-demo-001")
@@ -352,9 +357,63 @@ class PipelineTests(unittest.TestCase):
                          ("2026-09-13T16:00:00Z", "2026-09-20T16:00:00Z"))
         self.assertEqual(collection_bucket(now), "2026-09-21T06:00:00Z")
 
+    def test_weekly_analysis_uses_daily_results_and_replays_same_input(self) -> None:
+        pipeline = Pipeline(self.root)
+        values = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        for index, value in enumerate(values):
+            value["text"] += " x" * 115_000
+            path = self.root / f"day-{index}.json"
+            path.write_text(json.dumps([value], ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(pipeline.run_fixture(path)["status"], "succeeded")
+            day_start = datetime(2026, 9, 14 + index, 16, tzinfo=timezone.utc)
+            day_end = datetime(2026, 9, 15 + index, 16, tzinfo=timezone.utc)
+            daily = pipeline.analyze_window(day_start.isoformat(), day_end.isoformat(),
+                                            "daily-analysis")
+            self.assertEqual(daily["status"], "succeeded")
+
+        weekly = pipeline.analyze_window(
+            "2026-09-13T16:00:00Z", "2026-09-20T16:00:00Z", "weekly-analysis")
+        self.assertEqual(weekly["status"], "succeeded")
+        events, model_input = pipeline._load_snapshot(weekly["snapshot_id"])
+        self.assertEqual(len(events), 3)
+        self.assertLess(len(model_input), 100_000)
+        self.assertNotIn(" x" * 100, model_input)
+        rows = [json.loads(line) for line in model_input.splitlines()]
+        self.assertEqual(rows[0]["kind"], "weekly-daily-results")
+        self.assertEqual(len(rows) - 1, 6)
+        self.assertEqual(len(rows[0]["missing_days"]), 4)
+        replay = pipeline.replay(weekly["snapshot_id"])
+        self.assertEqual(replay["status"], "succeeded")
+        self.assertEqual(pipeline._load_snapshot(replay["snapshot_id"])[1], model_input)
+
+    def test_weekly_analysis_without_daily_results_is_unavailable(self) -> None:
+        pipeline = Pipeline(self.root)
+        pipeline.run_fixture(FIXTURE)
+        weekly = pipeline.analyze_window(
+            "2026-09-13T16:00:00Z", "2026-09-20T16:00:00Z", "weekly-analysis")
+        self.assertEqual(weekly["status"], "unavailable")
+        self.assertEqual(weekly["models_called"], 0)
+
     def test_token_estimate_handles_large_ascii_without_argmax_assumption(self) -> None:
         self.assertLess(Pipeline._estimate_input_tokens("a" * 270_000), 100_000)
         self.assertGreater(Pipeline._estimate_input_tokens("中" * 10_000), 10_000)
+
+    def test_transport_failure_without_model_output_does_not_use_call_budget(self) -> None:
+        db = Database(self.root / "budget.db")
+        db.initialize()
+        db.create_run("run_budget", "weekly-analysis")
+        with db.connect() as conn:
+            conn.execute("""INSERT INTO model_runs
+                (run_id,snapshot_id,provider,model,prompt_version,status,duration_ms,exit_code,
+                 input_tokens,output_tokens,cost_usd,output_path,attempts)
+                VALUES ('run_budget','snap-test','anthropic','real-model','v1','failed',180000,1,
+                        0,0,0,NULL,2)""")
+            conn.execute("""INSERT INTO model_runs
+                (run_id,snapshot_id,provider,model,prompt_version,status,duration_ms,exit_code,
+                 input_tokens,output_tokens,cost_usd,output_path,attempts)
+                VALUES ('run_budget','snap-test','openai','real-model','v1','failed',1000,1,
+                        NULL,NULL,NULL,'/tmp/model-output.json',1)""")
+        self.assertEqual(db.paid_model_calls_today(datetime.now(timezone.utc).date().isoformat()), 1)
 
 
 if __name__ == "__main__":

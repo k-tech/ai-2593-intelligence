@@ -207,6 +207,18 @@ class DashboardData:
     def initialize(self) -> None:
         self.db.initialize()
 
+    def snapshot_name(self, snapshot_id: str | None) -> str:
+        if not snapshot_id:
+            return ""
+        if not snapshot_id.startswith("snap_"):
+            return snapshot_id
+        row = self.db.get_snapshot(snapshot_id)
+        if not row:
+            return snapshot_id
+        created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+        local = created.astimezone(ZoneInfo("Asia/Shanghai"))
+        return f"snap{local:%Y-%m-%d-%H%M%S}"
+
     def overview(self) -> dict[str, Any]:
         with self.db.connect() as conn:
             run_counts = dict(conn.execute(
@@ -747,7 +759,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             cards.append(f"""<article class='finding'><div class='eyebrow'>{escape(item.get('kind','theme'))} · {escape(meta)}</div>
             <h3>{escape(str(item.get('title') or item.get('key') or 'Untitled'))}</h3>
             <p>{escape(str(item.get('summary') or ''))}</p>
-            <p class='muted'>{self._t('Confidence')}: {escape(str(confidence if confidence is not None else 'n/a'))} · {self._t('Snapshot')}: {escape(item['snapshot_id'])}</p>
+            <p class='muted'>{self._t('Confidence')}: {escape(str(confidence if confidence is not None else 'n/a'))} · {self._t('Snapshot')}: {escape(self.data.snapshot_name(item['snapshot_id']))}</p>
             <div>{evidence}</div></article>""")
         count_text = (f"来自每个模型/快照最新成功结果的 {len(findings)} 条发现。" if self.language == "zh" else
                       f"{len(findings)} findings from the latest successful output per provider/snapshot.")
@@ -794,7 +806,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        f"{escape(str(risk['reviewed_at']))} · {evidence}<br>"
                        f"{escape(str(risk['notes'] or ''))}</p>" if risk["reviewer"] else "")
             cards.append(f"""<article class='finding review-candidate'>
-                <div class='eyebrow'>{escape(risk['provider'])} · {escape(snapshot_id)} ·
+                <div class='eyebrow'>{escape(risk['provider'])} · {escape(self.data.snapshot_name(snapshot_id))} ·
                 {self._t(labels[risk['status']])}</div>
                 <p>{escape(risk['text'])}</p>{history}
                 <form method='post' action='/risk-reviews' class='review-form'>
@@ -947,10 +959,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             models.append(f"""<article class='finding'><h3>{escape(model['provider'])} · {escape(model['model'])}</h3>
             <p>{self._status(model['status'])} · exit {model['exit_code']} · {model['duration_ms']/1000:.1f}s · {('输入' if self.language == 'zh' else 'input')} {model.get('input_tokens') or 0:,} · {('输出' if self.language == 'zh' else 'output')} {model.get('output_tokens') or 0:,}</p>
             <p class='path'>{self._t('Output')}: {escape(str(model.get('output_path') or self._t('unavailable')))}</p>{stderr}</article>""")
-        manifest = escape(json.dumps(value.get("manifest"), ensure_ascii=False, indent=2)) if value.get("manifest") else self._t("Unavailable")
+        manifest_value = value.get("manifest")
+        manifest_text = json.dumps(manifest_value, ensure_ascii=False, indent=2) if manifest_value else ""
+        snapshot_id = value.get("snapshot_id")
+        if snapshot_id:
+            manifest_text = manifest_text.replace(snapshot_id, self.data.snapshot_name(snapshot_id))
+        manifest = escape(manifest_text) if manifest_text else self._t("Unavailable")
         replay = (("该运行本身已经是一次回放。" if self.language == "zh" else "This run is already a replay.")
                   if value["trigger_type"] == "replay" else
-                  (("回放来源快照：" if self.language == "zh" else "Replay source snapshot: ") + str(value.get('snapshot_id') or self._t('unavailable'))))
+                  (("回放来源快照：" if self.language == "zh" else "Replay source snapshot: ") + (self.data.snapshot_name(snapshot_id) or self._t('unavailable'))))
         readonly = "Dashboard 为只读；回放仍需通过 CLI 操作。" if self.language == "zh" else "Dashboard is read-only; replay remains a CLI operation."
         return f"""<a href='/runs'>← {self._t('Runs')}</a><h2>{escape(run_id)}</h2>
         <p>{self._status(value['status'])} · {escape(value['trigger_type'])} · {escape(str(value['started_at']))}</p>
@@ -1025,7 +1042,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _runs_table(self, runs: list[dict[str, Any]]) -> str:
         rows = "".join(
-            f"<tr><td><a href='/runs/{escape(run['run_id'])}'>{escape(run['run_id'])}</a></td><td>{escape(run['trigger_type'])}</td><td>{self._status(run['status'])}</td><td>{escape(str(run['started_at']))}</td><td>{escape(str(run.get('snapshot_id') or ''))}</td><td>{escape(str(run.get('error') or ''))}</td></tr>"
+            f"<tr><td><a href='/runs/{escape(run['run_id'])}'>{escape(run['run_id'])}</a></td><td>{escape(run['trigger_type'])}</td><td>{self._status(run['status'])}</td><td>{escape(str(run['started_at']))}</td><td>{escape(self.data.snapshot_name(run.get('snapshot_id')))}</td><td>{escape(str(run.get('error') or ''))}</td></tr>"
             for run in runs)
         return f"<div class='table-wrap'><table><thead><tr><th>{self._t('Run')}</th><th>{self._t('Trigger')}</th><th>{self._t('Status')}</th><th>{self._t('Started')}</th><th>{self._t('Snapshot')}</th><th>{self._t('Error')}</th></tr></thead><tbody>{rows}</tbody></table></div>"
 
